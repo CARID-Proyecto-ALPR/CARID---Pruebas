@@ -1,0 +1,34 @@
+# Requirements para Proyecto CARID - Detección y Reconocimiento de Placas Vehiculares
+# Python 3.8+ recomendado
+
+# Core: Procesamiento de imágenes y visión por computadora
+opencv-python>=4.9.0.0
+numpy>=1.23.0
+
+# Detección: Framework YOLOv8 para detección de objetos
+ultralytics>=8.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# OCR: Reconocimiento óptico de caracteres (opciones)
+# Opción principal (PaddleOCR)
+paddlepaddle-gpu>=2.6.0  # Versión GPU (recomendada si hay CUDA)
+# paddlepaddle>=2.6.0    # Versión CPU (descomente si no tiene GPU)
+paddleocr>=2.7.0.0
+
+# OCR alternativo (EasyOCR)
+easyocr>=1.7.0
+
+# Datos: Manejo y procesamiento de datos
+pandas>=2.0.0
+matplotlib>=3.7.0
+pillow>=10.0.0
+
+# Utilidades
+pyyaml>=6.0
+tqdm>=4.65.0
+scipy>=1.11.0
+
+# Opcional para desarrollo
+pytest>=7.0.0
+black>=23.0.0
