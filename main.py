@@ -34,6 +34,8 @@ def parse_args():
                         choices=["yolo"], help="Detector a utilizar")
     parser.add_argument("--ocr", type=str, default="paddle",
                         choices=["paddle", "easyocr"], help="Motor OCR a utilizar")
+    parser.add_argument("--speed-mode", action="store_true",
+                        help="Activa modo de alta velocidad (menor precisión)")
 
     return parser.parse_args()
 
@@ -55,6 +57,14 @@ def update_settings(args):
     if args.cooldown:
         settings.PLATE_COOLDOWN_TIME = args.cooldown
 
+    # Ajustes para modo de alta velocidad
+    if args.speed_mode:
+        # Aumentar intervalo de detección para procesar menos frames
+        settings.DETECTION_INTERVAL = max(5, settings.DETECTION_INTERVAL)
+        # Reducir frames de seguimiento para mayor velocidad
+        settings.PLATE_TRACKING_FRAMES = min(15, settings.PLATE_TRACKING_FRAMES)
+        print("Modo de alta velocidad activado - Intervalo de detección:", settings.DETECTION_INTERVAL)
+
     # Configuración de GPU/CPU
     if args.use_gpu:
         settings.USE_GPU = True
@@ -71,6 +81,9 @@ def main():
     """Función principal del sistema CARID."""
     print("Iniciando sistema CARID - Detección de Placas Vehiculares")
 
+    # Inicializar variables para control de tiempo
+    start_time = time.time()
+
     # Procesar argumentos y actualizar configuración
     args = parse_args()
     update_settings(args)
@@ -81,10 +94,6 @@ def main():
     print(f"- Usar GPU: {'Sí' if settings.USE_GPU else 'No'}")
     print(f"- Detector: {args.detector}")
     print(f"- Motor OCR: {args.ocr}")
-
-    # Inicializar variables para control de tiempo
-    start_time = time.time()  # Inicialización al principio para evitar errores
-    frame_count = 0
 
     # Inicializar componentes
     try:
@@ -135,16 +144,21 @@ def main():
         # Contadores y controles
         frame_count = 0
         fps_counter = FPSCounter()
-        start_time = time.time()
 
         # Variables para control adaptativo
         plate_tracking_countdown = 0
         last_frame_time = time.time()
 
+        # Control de tiempo para mantener velocidad de video
+        frame_time = 1.0 / video_fps if video_fps > 0 else 0.033  # ~30fps por defecto
+        next_frame_time = start_time
+
         print("Procesamiento iniciado. Presione ESC para salir.")
 
         # Bucle principal de procesamiento
         while True:
+            loop_start_time = time.time()
+
             # Leer frame
             ret, frame = cap.read()
             if not ret:
@@ -154,7 +168,7 @@ def main():
             frame_count += 1
             current_time = time.time()
 
-            # Determinar si procesar este frame
+            # Determinar si procesar este frame para detección
             process_this_frame = False
 
             # En modo seguimiento (después de detectar una placa)
@@ -174,7 +188,7 @@ def main():
             # Crear copia para visualización
             display_frame = frame.copy()
 
-            # Procesar frame si corresponde
+            # Procesar frame para detección si corresponde
             if process_this_frame:
                 # Detectar placas
                 detections = detector.detect(frame)
@@ -224,8 +238,8 @@ def main():
             # Determinar modo actual
             current_mode = "SEGUIMIENTO" if plate_tracking_countdown > 0 else "NORMAL"
 
-            # Mostrar información de estado
-            if frame_count % 30 == 0:
+            # Mostrar información de estado (menos frecuente para mejor rendimiento)
+            if frame_count % 60 == 0:
                 elapsed = time.time() - start_time
                 avg_fps = frame_count / elapsed if elapsed > 0 else 0
                 print(f"Frame: {frame_count} | FPS: {fps:.1f} | "
@@ -245,14 +259,20 @@ def main():
                 }
             )
 
-            # Control de velocidad para el modo normal
-            if plate_tracking_countdown == 0:
-                # Mantener FPS del video original
-                elapsed = time.time() - current_time
-                target_time = 1.0 / video_fps
-                sleep_time = max(0, target_time - elapsed)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+            # Control de velocidad preciso para reproducción a velocidad normal
+            loop_end_time = time.time()
+            loop_duration = loop_end_time - loop_start_time
+
+            # Calcular tiempo de espera para mantener velocidad de video real
+            next_frame_time += frame_time
+            sleep_time = next_frame_time - loop_end_time
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                # Si estamos retrasados, ajustar next_frame_time
+                if sleep_time < -5 * frame_time:  # Si estamos muy retrasados
+                    next_frame_time = loop_end_time + frame_time  # Reiniciar
 
             # Salir con ESC
             if cv2.waitKey(1) == 27:
@@ -264,7 +284,7 @@ def main():
 
     finally:
         # Guardar datos y limpiar
-        if hasattr(locals(), 'data_handler') and data_handler.get_plate_count() > 0:
+        if 'data_handler' in locals() and data_handler.get_plate_count() > 0:
             data_handler.save_data()
 
         # Estadísticas finales
