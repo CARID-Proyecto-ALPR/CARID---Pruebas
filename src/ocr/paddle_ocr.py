@@ -7,11 +7,22 @@ import re
 import time
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
 from difflib import SequenceMatcher
 
 from src.config import settings
 from src.ocr.ocr_engine import OCREngine
+
+# Importamos PaddleOCR de forma condicional con manejo de errores
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+    print("ADVERTENCIA: No se pudo importar PaddleOCR. Se utilizará un modo de compatibilidad.")
+except Exception as e:
+    PADDLEOCR_AVAILABLE = False
+    print(f"ERROR al importar PaddleOCR: {e}")
+    print("Se utilizará un modo de compatibilidad.")
 
 
 class PaddleOCREngine(OCREngine):
@@ -21,6 +32,12 @@ class PaddleOCREngine(OCREngine):
         """Inicializa el motor PaddleOCR."""
         super().__init__()
         try:
+            # Si PaddleOCR no está disponible, fallamos silenciosamente
+            if not PADDLEOCR_AVAILABLE:
+                print("PaddleOCR no disponible. Se recomienda usar --ocr easyocr como alternativa.")
+                self._initialized = False
+                return
+
             # Configuración desde settings
             use_gpu = settings.USE_GPU
             batch_size = settings.BATCH_SIZE
@@ -31,26 +48,48 @@ class PaddleOCREngine(OCREngine):
                 use_gpu = False
                 print("PaddleOCR: Uso de GPU desactivado por variable de entorno")
 
-            # Configuración del motor
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang='en',  # Para caracteres alfanuméricos
-                use_gpu=use_gpu,
-                enable_mkldnn=not use_gpu,  # MKL-DNN solo para CPU
-                det_algorithm="DB",  # Algoritmo de detección rápido
-                rec_batch_num=batch_size if use_gpu else 1,
-                cls_batch_num=batch_size if use_gpu else 1,
-                use_mp=not use_gpu,  # Multiprocesamiento solo para CPU
-                show_log=False
-            )
+            # Configuración del motor con manejo de errores
+            try:
+                self.ocr = PaddleOCR(
+                    use_angle_cls=True,
+                    lang='en',  # Para caracteres alfanuméricos
+                    use_gpu=use_gpu,
+                    enable_mkldnn=not use_gpu,  # MKL-DNN solo para CPU
+                    det_algorithm="DB",  # Algoritmo de detección rápido
+                    rec_batch_num=batch_size if use_gpu else 1,
+                    cls_batch_num=batch_size if use_gpu else 1,
+                    use_mp=not use_gpu,  # Multiprocesamiento solo para CPU
+                    show_log=False
+                )
+                self._initialized = True
+            except Exception as e:
+                print(f"Error inicializando PaddleOCR con parámetros completos: {e}")
+                print("Intentando con configuración mínima...")
 
-            self._initialized = True
+                # Intentar con una configuración mínima
+                try:
+                    self.ocr = PaddleOCR(
+                        use_angle_cls=False,
+                        lang='en',
+                        use_gpu=False,  # Forzar CPU como fallback
+                        show_log=False
+                    )
+                    self._initialized = True
+                    print("PaddleOCR inicializado con configuración mínima (modo CPU)")
+                except Exception as e2:
+                    print(f"Error inicializando PaddleOCR en modo mínimo: {e2}")
+                    self._initialized = False
+                    return
+
             self.recent_readings = []  # Para sistema de votación
             self.max_readings = 5  # Máximo de lecturas a mantener
 
-            # Realizar precalentamiento si está activado
-            if preload_model:
-                self._warmup_inference()
+            # Realizar precalentamiento si está activado y hemos tenido éxito
+            if preload_model and self._initialized:
+                try:
+                    self._warmup_inference()
+                except Exception as e:
+                    print(f"Advertencia: Error en precalentamiento: {e}")
 
             mode_str = "GPU" if use_gpu else "CPU"
             print(f"Motor PaddleOCR inicializado (modo {mode_str})")

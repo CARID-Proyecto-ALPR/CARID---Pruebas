@@ -2,33 +2,31 @@
 # Python 3.8+ recomendado
 
 # Core: Procesamiento de imágenes y visión por computadora
-opencv-python>=4.9.0.0
-numpy>=1.23.0
+numpy==1.23.5
+opencv-python==4.8.0.76
 
 # Detección: Framework YOLOv8 para detección de objetos
-ultralytics>=8.3.0
-torch>=2.0.0
-torchvision>=0.15.0
+ultralytics==8.0.196
+torch==2.0.1
+torchvision==0.15.2
 
 # OCR: Reconocimiento óptico de caracteres (opciones)
 # Opción principal (PaddleOCR)
-paddlepaddle-gpu>=2.6.0  # Versión GPU (recomendada si hay CUDA)
-# paddlepaddle>=2.6.0    # Versión CPU (descomente si no tiene GPU)
-paddleocr>=2.7.0.0
+paddlepaddle-gpu==2.6.1.post120
+paddleocr==2.7.0.3
 
 # OCR alternativo (EasyOCR)
-easyocr>=1.7.0
+easyocr==1.7.0
 
 # Datos: Manejo y procesamiento de datos
-pandas>=2.0.0
-matplotlib>=3.7.0
-pillow>=10.0.0
+pandas==2.0.3
+matplotlib==3.7.2
+pillow==10.0.1
 
 # Utilidades
-pyyaml>=6.0
-tqdm>=4.65.0
-scipy>=1.11.0
+pyyaml==6.0.1
+tqdm==4.65.0
+scipy==1.11.3
 
 # Opcional para desarrollo
-pytest>=7.0.0
-black>=23.0.0
+pytest==7.4.0

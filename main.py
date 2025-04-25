@@ -82,6 +82,10 @@ def main():
     print(f"- Detector: {args.detector}")
     print(f"- Motor OCR: {args.ocr}")
 
+    # Inicializar variables para control de tiempo
+    start_time = time.time()  # Inicialización al principio para evitar errores
+    frame_count = 0
+
     # Inicializar componentes
     try:
         # Crear detector según configuración

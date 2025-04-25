@@ -83,14 +83,17 @@ def install_dependencies(gpu_mode=True):
 
         # Instalar dependencias comunes
         common_deps = [
-            "opencv-python>=4.9.0.0",
-            "numpy>=1.23.0",
-            "pandas>=2.0.0",
-            "matplotlib>=3.7.0",
-            "ultralytics>=8.3.0",  # Para YOLOv8
-            "tqdm>=4.65.0",
-            "pillow>=10.0.0",
-            "pyyaml>=6.0"
+            "numpy==1.23.5",
+            "opencv-python==4.8.0.76",
+            "pandas==2.0.3",
+            "matplotlib==3.7.2",
+            "ultralytics==8.0.196",  # Para YOLOv8
+            "torch==2.0.1",
+            "torchvision==0.15.2",
+            "tqdm==4.65.0",
+            "pillow==10.0.1",
+            "pyyaml==6.0.1",
+            "scipy==1.11.3"
         ]
 
         # Instalar desde archivo requirements si existe
@@ -98,32 +101,35 @@ def install_dependencies(gpu_mode=True):
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
             print("✓ Dependencias instaladas desde requirements.txt")
         else:
-            # Instalar dependencias comunes
-            for dep in common_deps:
+            # Instalar dependencias comunes (primero numpy para evitar conflictos)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy==1.23.5"])
+            print("✓ NumPy instalado")
+
+            for dep in common_deps[1:]:  # Saltar numpy que ya instalamos
                 subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
 
             # Instalar PaddleOCR según modo
             if gpu_mode:
                 # Versión GPU
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "paddlepaddle-gpu>=2.6.0"])
+                print("Instalando PaddlePaddle GPU...")
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install",
+                    "paddlepaddle-gpu==2.6.1.post120",
+                    "-f", "https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html"
+                ])
                 print("✓ PaddlePaddle GPU instalado")
             else:
                 # Versión CPU
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "paddlepaddle>=2.6.0"])
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "paddlepaddle==2.6.0"])
                 print("✓ PaddlePaddle CPU instalado")
 
             # Instalar PaddleOCR
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "paddleocr>=2.7.0.0"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "paddleocr==2.7.0.3"])
             print("✓ PaddleOCR instalado")
 
             # Instalar EasyOCR (alternativa)
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr>=1.7.0"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr==1.7.0"])
             print("✓ EasyOCR instalado")
-
-            # Instalar PyTorch (requerido para EasyOCR y útil para verificación)
-            torch_cmd = [sys.executable, "-m", "pip", "install", "torch>=2.0.0", "torchvision>=0.15.0"]
-            subprocess.check_call(torch_cmd)
-            print("✓ PyTorch instalado")
 
         print("✓ Todas las dependencias instaladas correctamente")
         return True
@@ -145,49 +151,66 @@ def check_cuda():
 
     try:
         # Verificar con PaddlePaddle (versión actualizada)
-        import paddle
-        paddle_cuda = paddle.is_compiled_with_cuda()
+        try:
+            import paddle
+            paddle_cuda = paddle.is_compiled_with_cuda()
 
-        if paddle_cuda:
-            print("✓ PaddlePaddle compilado con soporte CUDA")
-            try:
-                # Método moderno para obtener dispositivos en PaddlePaddle
-                device_count = len(paddle.static.cuda_places())
-                print(f"✓ GPUs disponibles para PaddlePaddle: {device_count}")
-                cuda_available = device_count > 0
-            except Exception as e:
-                print(f"✗ No se pudieron enumerar GPUs: {str(e)}")
-        else:
-            print("✗ PaddlePaddle no tiene soporte CUDA")
+            if paddle_cuda:
+                print("✓ PaddlePaddle compilado con soporte CUDA")
+                try:
+                    # Método moderno para obtener dispositivos en PaddlePaddle
+                    device_count = len(paddle.static.cuda_places())
+                    print(f"✓ GPUs disponibles para PaddlePaddle: {device_count}")
+                    cuda_available = device_count > 0
+                except Exception as e:
+                    print(f"✗ No se pudieron enumerar GPUs con PaddlePaddle: {str(e)}")
+            else:
+                print("✗ PaddlePaddle no tiene soporte CUDA")
+        except ImportError:
+            print("✗ No se pudo importar PaddlePaddle")
+        except Exception as paddle_e:
+            print(f"✗ Error al verificar CUDA con PaddlePaddle: {str(paddle_e)}")
 
-    except ImportError:
-        print("✗ No se pudo importar PaddlePaddle")
+    except Exception as e:
+        print(f"Error general verificando CUDA con PaddlePaddle: {e}")
 
+    # Verificar con PyTorch (alternativa)
     try:
-        # Verificar con PyTorch (alternativa)
+        print("Intentando verificar CUDA con PyTorch...")
         import torch
         torch_cuda = torch.cuda.is_available()
 
         if torch_cuda:
             print("✓ PyTorch detecta CUDA")
-            device_count = torch.cuda.device_count()
-            print(f"✓ GPUs disponibles para PyTorch: {device_count}")
+            try:
+                device_count = torch.cuda.device_count()
+                print(f"✓ GPUs disponibles para PyTorch: {device_count}")
 
-            for i in range(device_count):
-                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+                for i in range(device_count):
+                    print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
 
-            cuda_available = cuda_available or (device_count > 0)
+                cuda_available = cuda_available or (device_count > 0)
+            except Exception as e:
+                print(f"✗ Error al obtener información de GPUs con PyTorch: {str(e)}")
+                print("  Este error no afectará el funcionamiento del sistema.")
         else:
             print("✗ PyTorch no detecta CUDA")
 
     except ImportError:
         print("✗ No se pudo importar PyTorch")
+    except Exception as e:
+        print(f"✗ Error al verificar CUDA con PyTorch: {str(e)}")
+        print("  Este error no afectará el funcionamiento del sistema.")
 
     # Verificar nvidia-smi (solo información adicional)
     try:
-        subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        print("✓ nvidia-smi ejecutado correctamente")
-    except:
+        result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode == 0:
+            print("✓ nvidia-smi ejecutado correctamente")
+            cuda_available = True
+        else:
+            print("✗ nvidia-smi devolvió un error")
+    except Exception:
         print("✗ No se pudo ejecutar nvidia-smi")
 
     if cuda_available:
@@ -353,6 +376,8 @@ def show_final_message(cuda_available):
     print("  --ocr TYPE       Selecciona el motor OCR ('paddle' o 'easyocr')")
 
     print("\nAsegúrese de colocar el modelo YOLOv8 (best.pt) en la carpeta 'models/'")
+    print("y un video de prueba en la carpeta 'input/video_prueba.MOV' o especificar")
+    print("la ruta con --video")
 
     print("\n¡Listo para comenzar a detectar placas!")
     print("=" * 60)
