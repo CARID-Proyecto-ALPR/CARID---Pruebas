@@ -49,9 +49,9 @@ class PaddleOCREngine(OCREngine):
                 det_model_dir=None,       # Usar modelo predeterminado (más rápido)
                 rec_model_dir=None,       # Usar modelo predeterminado (más rápido)
                 # Parámetros de rendimiento adicionales
-                use_tensorrt=use_gpu,     # Usar TensorRT para aceleración si está disponible
+                use_tensorrt=False,     # Usar TensorRT para aceleración si está disponible
                 # Para mejor rendimiento, elegimos precision nivel INT8
-                precision="int8" if use_gpu else "fp32"
+                precision="fp32",  # Usar precisión estándar para compatibilidad
             )
 
             self._initialized = True
