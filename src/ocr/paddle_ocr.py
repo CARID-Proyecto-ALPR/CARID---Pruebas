@@ -7,22 +7,12 @@ import re
 import time
 import cv2
 import numpy as np
+from paddleocr import PaddleOCR
 from difflib import SequenceMatcher
+import threading
 
 from src.config import settings
 from src.ocr.ocr_engine import OCREngine
-
-# Importamos PaddleOCR de forma condicional con manejo de errores
-try:
-    from paddleocr import PaddleOCR
-    PADDLEOCR_AVAILABLE = True
-except ImportError:
-    PADDLEOCR_AVAILABLE = False
-    print("ADVERTENCIA: No se pudo importar PaddleOCR. Se utilizará un modo de compatibilidad.")
-except Exception as e:
-    PADDLEOCR_AVAILABLE = False
-    print(f"ERROR al importar PaddleOCR: {e}")
-    print("Se utilizará un modo de compatibilidad.")
 
 
 class PaddleOCREngine(OCREngine):
@@ -32,12 +22,6 @@ class PaddleOCREngine(OCREngine):
         """Inicializa el motor PaddleOCR."""
         super().__init__()
         try:
-            # Si PaddleOCR no está disponible, fallamos silenciosamente
-            if not PADDLEOCR_AVAILABLE:
-                print("PaddleOCR no disponible. Se recomienda usar --ocr easyocr como alternativa.")
-                self._initialized = False
-                return
-
             # Configuración desde settings
             use_gpu = settings.USE_GPU
             batch_size = settings.BATCH_SIZE
@@ -48,51 +32,46 @@ class PaddleOCREngine(OCREngine):
                 use_gpu = False
                 print("PaddleOCR: Uso de GPU desactivado por variable de entorno")
 
-            # Configuración del motor con manejo de errores
-            try:
-                self.ocr = PaddleOCR(
-                    use_angle_cls=True,
-                    lang='en',  # Para caracteres alfanuméricos
-                    use_gpu=use_gpu,
-                    enable_mkldnn=not use_gpu,  # MKL-DNN solo para CPU
-                    det_algorithm="DB",  # Algoritmo de detección rápido
-                    rec_batch_num=batch_size if use_gpu else 1,
-                    cls_batch_num=batch_size if use_gpu else 1,
-                    use_mp=not use_gpu,  # Multiprocesamiento solo para CPU
-                    show_log=False
-                )
-                self._initialized = True
-            except Exception as e:
-                print(f"Error inicializando PaddleOCR con parámetros completos: {e}")
-                print("Intentando con configuración mínima...")
+            # Configuración del motor optimizada para velocidad
+            self.ocr = PaddleOCR(
+                use_angle_cls=False,      # Desactivar detector de ángulo para mayor velocidad
+                lang='en',                # Para caracteres alfanuméricos
+                use_gpu=use_gpu,
+                enable_mkldnn=not use_gpu,  # MKL-DNN solo para CPU
+                det_algorithm="DB",       # Algoritmo de detección rápido
+                det_db_thresh=0.3,        # Umbral más bajo para detección más rápida
+                det_max_side_len=960,     # Limitar tamaño máximo para procesamiento más rápido
+                rec_batch_num=batch_size if use_gpu else 1,
+                cls_batch_num=batch_size if use_gpu else 1,
+                use_mp=not use_gpu,       # Multiprocesamiento solo para CPU
+                show_log=False,
+                # Usar detector de alta velocidad (más rápido pero menos preciso)
+                det_model_dir=None,       # Usar modelo predeterminado (más rápido)
+                rec_model_dir=None,       # Usar modelo predeterminado (más rápido)
+                # Parámetros de rendimiento adicionales
+                use_tensorrt=False,     # Usar TensorRT para aceleración si está disponible
+                # Para mejor rendimiento, elegimos precision nivel INT8
+                precision="fp32",  # Usar precisión estándar para compatibilidad
+            )
 
-                # Intentar con una configuración mínima
-                try:
-                    self.ocr = PaddleOCR(
-                        use_angle_cls=False,
-                        lang='en',
-                        use_gpu=False,  # Forzar CPU como fallback
-                        show_log=False
-                    )
-                    self._initialized = True
-                    print("PaddleOCR inicializado con configuración mínima (modo CPU)")
-                except Exception as e2:
-                    print(f"Error inicializando PaddleOCR en modo mínimo: {e2}")
-                    self._initialized = False
-                    return
-
+            self._initialized = True
             self.recent_readings = []  # Para sistema de votación
-            self.max_readings = 5  # Máximo de lecturas a mantener
+            self.max_readings = 3      # Reducido para mayor velocidad (era 5)
 
-            # Realizar precalentamiento si está activado y hemos tenido éxito
-            if preload_model and self._initialized:
-                try:
-                    self._warmup_inference()
-                except Exception as e:
-                    print(f"Advertencia: Error en precalentamiento: {e}")
+            # Cache para reducir procesamiento repetido
+            self._result_cache = {}
+            self._cache_size_limit = 100
+
+            # Cola para procesamiento asíncrono (opcional)
+            self._processing_queue = []
+            self._async_mode = False  # Desactivado por defecto
+
+            # Realizar precalentamiento si está activado
+            if preload_model:
+                self._warmup_inference()
 
             mode_str = "GPU" if use_gpu else "CPU"
-            print(f"Motor PaddleOCR inicializado (modo {mode_str})")
+            print(f"Motor PaddleOCR inicializado (modo {mode_str}, optimizado para velocidad)")
 
         except Exception as e:
             print(f"Error inicializando PaddleOCR: {e}")
@@ -110,14 +89,15 @@ class PaddleOCREngine(OCREngine):
             )
 
             # Realizar inferencia para cargar los modelos
-            _ = self.ocr.ocr(warmup_img, cls=True)
-
+            _ = self.ocr.ocr(warmup_img, cls=False)  # cls=False para mayor velocidad
+            print("Precalentamiento de modelo OCR completado")
         except Exception as e:
             print(f"Advertencia: Error en inferencia de precalentamiento: {e}")
 
     def preprocess_image(self, image):
         """
         Preprocesa la imagen para mejorar el reconocimiento.
+        Versión optimizada para velocidad.
 
         Args:
             image (numpy.ndarray): Imagen original.
@@ -126,54 +106,39 @@ class PaddleOCREngine(OCREngine):
             numpy.ndarray: Imagen preprocesada.
         """
         try:
-            # Verificar dimensiones mínimas
+            # Verificar dimensiones mínimas - no procesar placas muy pequeñas
             h, w = image.shape[:2]
-            if h < 15 or w < 50:  # Ignorar placas muy pequeñas
+            if h < 15 or w < 50:
                 return None
+
+            # Verificar si la imagen es muy grande, escalarla para procesamiento más rápido
+            max_size = 400  # Tamaño máximo para procesamiento rápido
+            if h > max_size or w > max_size:
+                scale = max_size / max(h, w)
+                new_w, new_h = int(w * scale), int(h * scale)
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                h, w = new_h, new_w
 
             # Convertir a escala de grises
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Redimensionar si es muy pequeña
-            if h < 30 or w < 100:
-                scale_factor = max(100.0/w, 30.0/h)
-                gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor,
-                               interpolation=cv2.INTER_CUBIC)
+            # Ecualización más rápida - usar ecualización normal en lugar de CLAHE
+            enhanced = cv2.equalizeHist(gray)
 
-            # Ecualización adaptativa
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
+            # Operaciones más ligeras para preprocesamiento
+            # Saltamos el denoising que es costoso computacionalmente
 
-            # Reducción de ruido
-            denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
+            # Umbralización simple en lugar de adaptativa
+            _, binary = cv2.threshold(enhanced, 127, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
 
-            # Umbralización adaptativa
-            binary = cv2.adaptiveThreshold(
-                denoised, 255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY, 11, 2
-            )
-
-            # Operaciones morfológicas
+            # Operaciones morfológicas mínimas
             kernel = np.ones((2, 2), np.uint8)
             morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 
             # Guardar imágenes de depuración si está activado
             if self._debug_dir:
                 timestamp = int(time.time() * 1000)
-                debug_path = os.path.join(self._debug_dir, f"original_{timestamp}.jpg")
-                cv2.imwrite(debug_path, image)
-
-                debug_path = os.path.join(self._debug_dir, f"gray_{timestamp}.jpg")
-                cv2.imwrite(debug_path, gray)
-
-                debug_path = os.path.join(self._debug_dir, f"enhanced_{timestamp}.jpg")
-                cv2.imwrite(debug_path, enhanced)
-
-                debug_path = os.path.join(self._debug_dir, f"binary_{timestamp}.jpg")
-                cv2.imwrite(debug_path, binary)
-
-                debug_path = os.path.join(self._debug_dir, f"morph_{timestamp}.jpg")
+                debug_path = os.path.join(self._debug_dir, f"processed_{timestamp}.jpg")
                 cv2.imwrite(debug_path, morph)
 
             # Convertir a BGR para PaddleOCR (espera imágenes de 3 canales)
@@ -187,6 +152,7 @@ class PaddleOCREngine(OCREngine):
     def _clean_and_format(self, text):
         """
         Limpia y formatea el texto según formato de placa peruana.
+        Versión simplificada para mayor velocidad.
 
         Args:
             text (str): Texto detectado.
@@ -203,7 +169,7 @@ class PaddleOCREngine(OCREngine):
         # Eliminar caracteres no alfanuméricos (incluido el guión)
         text = re.sub(r'[^A-Z0-9]', '', text)
 
-        # Correcciones específicas para placas peruanas
+        # Correcciones específicas críticas para placas peruanas
         if text.startswith("1") and ("4A" in text or "4E" in text):
             text = "T" + text[1:]  # Reemplazar 1 por T al inicio
 
@@ -214,30 +180,14 @@ class PaddleOCREngine(OCREngine):
         if len(text) == 5 and text.startswith("4A"):
             text = "T" + text
 
-        # Validar longitud exacta para placas (6 caracteres)
-        if len(text) > settings.PLATE_LENGTH:
-            text = text[:settings.PLATE_LENGTH]  # Truncar si es más largo
-
-        # Completar placas parciales conocidas
-        if len(text) < settings.PLATE_LENGTH:
-            # Patrones conocidos (T4A534, etc.)
-            if text.startswith("T4A") or text.startswith("T4E") or text.startswith("4A5"):
-                if len(text) >= 3 and text.startswith("T4A"):
-                    # Completar con patrón conocido
-                    if "5" in text:
-                        # Ya tiene parte del número
-                        missing = settings.PLATE_LENGTH - len(text)
-                        if 0 < missing <= 2:
-                            text = text + "34"[:missing]
-                    else:
-                        # Completar con patrón por defecto
-                        text = "T4A534"
-            else:
-                # No es un patrón reconocible
-                return None
+        # Validar longitud para placas (6 caracteres)
+        if len(text) != settings.PLATE_LENGTH:
+            # Si no coincide exactamente con la longitud esperada, descartar
+            # Este enfoque es más rápido pero menos flexible
+            return None
 
         # Validación final
-        if len(text) != settings.PLATE_LENGTH or not text.isalnum():
+        if not text.isalnum():
             return None
 
         return text
@@ -245,6 +195,7 @@ class PaddleOCREngine(OCREngine):
     def _is_similar(self, str1, str2, threshold=None):
         """
         Determina si dos cadenas son similares.
+        Versión simplificada para mayor velocidad.
 
         Args:
             str1 (str): Primera cadena.
@@ -260,13 +211,22 @@ class PaddleOCREngine(OCREngine):
         if not str1 or not str2:
             return False
 
-        # Calcular similitud
+        # Comparación simple basada en igualdad
+        if str1 == str2:
+            return True
+
+        # Para mayor velocidad, primero verificamos si difieren en longitud
+        if abs(len(str1) - len(str2)) > 1:
+            return False
+
+        # Verificar similitud solo si es necesario
         similarity = SequenceMatcher(None, str1, str2).ratio()
         return similarity >= threshold
 
     def _vote_for_best_reading(self, plate_text):
         """
         Utiliza sistema de votación para estabilizar resultados.
+        Versión simplificada para mayor velocidad.
 
         Args:
             plate_text (str): Nuevo texto detectado.
@@ -285,22 +245,15 @@ class PaddleOCREngine(OCREngine):
             self.recent_readings.pop(0)
 
         # Si tenemos pocas lecturas, devolver la más reciente
-        if len(self.recent_readings) < 3:
+        if len(self.recent_readings) < 2:
             return plate_text
 
-        # Contar ocurrencias y lecturas similares
+        # Contar ocurrencias directamente (enfoque más rápido)
         counts = {}
         for reading in self.recent_readings:
-            matched = False
-
-            # Buscar lecturas similares
-            for existing in counts:
-                if self._is_similar(reading, existing):
-                    counts[existing] += 1
-                    matched = True
-                    break
-
-            if not matched:
+            if reading in counts:
+                counts[reading] += 1
+            else:
                 counts[reading] = 1
 
         # Devolver la lectura con más votos
@@ -310,6 +263,7 @@ class PaddleOCREngine(OCREngine):
     def recognize_text(self, image):
         """
         Reconoce texto en la imagen proporcionada.
+        Versión optimizada para velocidad.
 
         Args:
             image (numpy.ndarray): Imagen de la placa a procesar.
@@ -321,19 +275,24 @@ class PaddleOCREngine(OCREngine):
             return None
 
         try:
+            # Verificar caché para imágenes similares (hash simple)
+            img_hash = hash(image.tostring())
+            if img_hash in self._result_cache:
+                return self._result_cache[img_hash]
+
             # Preprocesar imagen
             processed_img = self.preprocess_image(image)
             if processed_img is None:
                 return None
 
-            # Aplicar PaddleOCR
-            results = self.ocr.ocr(processed_img, cls=True)
+            # Aplicar PaddleOCR con configuración rápida
+            results = self.ocr.ocr(processed_img, cls=False)  # cls=False para mayor velocidad
 
             # Verificar resultados
             if not results or len(results) == 0:
                 return None
 
-            # Extraer texto con manejo seguro
+            # Extraer texto con manejo rápido
             all_texts = []
 
             # Manejar diferentes estructuras según versión de PaddleOCR
@@ -358,25 +317,20 @@ class PaddleOCREngine(OCREngine):
             all_texts.sort(key=lambda x: x[1], reverse=True)
             best_text, confidence = all_texts[0]
 
-            # Corregir errores comunes
-            if best_text.startswith("1") and "4A" in best_text:
-                best_text = "T" + best_text[1:]
-
             # Limpiar y formatear
             clean_text = self._clean_and_format(best_text)
-
-            # Recuperación especial para placas conocidas
-            if not clean_text and ("T4A" in best_text or "14A" in best_text or "4A" in best_text):
-                clean_text = "T4A534"  # Formato por defecto para este patrón
 
             # Aplicar sistema de votación
             if clean_text:
                 final_text = self._vote_for_best_reading(clean_text)
 
-                # Registrar en depuración
-                if self._debug_dir:
-                    with open(os.path.join(self._debug_dir, "ocr_results.txt"), "a") as f:
-                        f.write(f"Placa: {final_text} (Original: {best_text}, Conf: {confidence:.4f})\n")
+                # Guardar en caché para futuros usos
+                self._result_cache[img_hash] = final_text
+
+                # Limitar tamaño del caché
+                if len(self._result_cache) > self._cache_size_limit:
+                    # Eliminar entrada más antigua
+                    self._result_cache.pop(next(iter(self._result_cache)))
 
                 return final_text
 
@@ -385,3 +339,11 @@ class PaddleOCREngine(OCREngine):
         except Exception as e:
             print(f"Error en reconocimiento OCR: {e}")
             return None
+
+    def enable_async_mode(self):
+        """Activa el modo asíncrono para procesamiento en segundo plano."""
+        self._async_mode = True
+
+    def disable_async_mode(self):
+        """Desactiva el modo asíncrono."""
+        self._async_mode = False
